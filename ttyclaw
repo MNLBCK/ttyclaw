@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+show_help() {
+  cat <<'EOF'
+Usage: ttyclaw [options] <question>
+
+Ask an OpenClaw agent from the terminal and print the answer.
+
+Options:
+  --agent <id>         OpenClaw agent id to use (default: main)
+  --session-key <key>  Persistent session key (default: terminal)
+  --model <id>         Model override for this run
+  --thinking <level>   Thinking level passed to openclaw agent
+  --local              Run the embedded agent locally
+  --json               Print raw OpenClaw JSON output
+  -h, --help           Show this help text
+
+Environment overrides:
+  TTYCLAW_AGENT, TTYCLAW_SESSION_KEY, TTYCLAW_MODEL, TTYCLAW_THINKING,
+  TTYCLAW_LOCAL, TTYCLAW_JSON
+  OPENCLAW_BIN
+EOF
+}
+
+agent_file="${XDG_CONFIG_HOME:-$HOME/.config}/ttyclaw/agent"
+if [ -z "${TTYCLAW_AGENT+x}" ] && [ -r "$agent_file" ]; then
+  TTYCLAW_AGENT="$(head -n 1 "$agent_file")"
+fi
+
+agent="${TTYCLAW_AGENT:-main}"
+session_key="${TTYCLAW_SESSION_KEY:-terminal}"
+model="${TTYCLAW_MODEL:-}"
+thinking="${TTYCLAW_THINKING:-}"
+local_mode="${TTYCLAW_LOCAL:-0}"
+json_mode="${TTYCLAW_JSON:-0}"
+prompt_parts=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    --agent)
+      shift
+      agent="${1:?missing value for --agent}"
+      ;;
+    --session-key)
+      shift
+      session_key="${1:?missing value for --session-key}"
+      ;;
+    --model)
+      shift
+      model="${1:?missing value for --model}"
+      ;;
+    --thinking)
+      shift
+      thinking="${1:?missing value for --thinking}"
+      ;;
+    --local)
+      local_mode=1
+      ;;
+    --json)
+      json_mode=1
+      ;;
+    --)
+      shift
+      prompt_parts+=("$@")
+      break
+      ;;
+    -*)
+      echo "ttyclaw: unknown option: $1" >&2
+      show_help >&2
+      exit 2
+      ;;
+    *)
+      prompt_parts+=("$1")
+      ;;
+  esac
+  shift
+done
+
+prompt="${prompt_parts[*]}"
+
+if [ ! -t 0 ]; then
+  stdin_prompt="$(cat)"
+  if [ -n "$stdin_prompt" ]; then
+    if [ -n "$prompt" ]; then
+      prompt="${prompt}"$'\n\n'"${stdin_prompt}"
+    else
+      prompt="$stdin_prompt"
+    fi
+  fi
+fi
+
+if [ -z "$prompt" ]; then
+  show_help >&2
+  exit 1
+fi
+
+openclaw_bin="${OPENCLAW_BIN:-$(command -v openclaw || true)}"
+if [ -z "$openclaw_bin" ]; then
+  openclaw_bin="$HOME/.npm-global/bin/openclaw"
+fi
+
+if [ ! -x "$openclaw_bin" ]; then
+  echo "ttyclaw: openclaw not found" >&2
+  exit 127
+fi
+
+cmd=(
+  "$openclaw_bin"
+  agent
+  --agent "$agent"
+  --session-key "$session_key"
+  --json
+  --message "$prompt"
+)
+
+if [ -n "$model" ]; then
+  cmd+=(--model "$model")
+fi
+
+if [ -n "$thinking" ]; then
+  cmd+=(--thinking "$thinking")
+fi
+
+if [ "$local_mode" = "1" ]; then
+  cmd+=(--local)
+fi
+
+json="$("${cmd[@]}")"
+
+if [ "$json_mode" = "1" ]; then
+  printf '%s\n' "$json"
+  exit 0
+fi
+
+text="$(printf '%s\n' "$json" | jq -r '.result.finalAssistantVisibleText // .result.payloads[0].text // .result.finalAssistantRawText // empty')"
+
+if [ -z "$text" ]; then
+  printf '%s\n' "$json"
+elif [ -t 1 ]; then
+  prompt_lines="$(printf '%s\n' "$prompt" | fold -s -w 80)"
+  prompt_preview="$(printf '%s\n' "$prompt_lines" | sed -n '1,2p')"
+  if [ "$(printf '%s\n' "$prompt_lines" | wc -l | tr -d ' ')" -gt 2 ]; then
+    prompt_preview+=$'\n…'
+  fi
+  printf '\033[36mFrage\n%s\033[0m\n\033[32mAntwort\n%s\033[0m\n' "$prompt_preview" "$text"
+else
+  printf '%s\n' "$text"
+fi
